@@ -8,6 +8,7 @@ from openexecutive.audit.usage import log_model_usage
 from openexecutive.config import get_settings
 from openexecutive.providers import get_provider, model_supports_deep_reasoning
 
+
 # LOCAL-ONLY FORK: was a hardcoded 180.0. Now configurable, default unchanged.
 #
 # Upstream's 180s is generous when eight consults really do run in parallel on
