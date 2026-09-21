@@ -18,11 +18,15 @@ request reaches a local model -- the local server cannot execute it. Client-side
 tools carrying an `input_schema` are NOT stripped, and MCP tools arrive in
 exactly that shape, so this restores search for the local-only setup.
 
-Deliberately thin: results are pure pointers -- title and URL, no page text (see
-INCLUDE_SNIPPETS). The model spends its context on pages it chose to read via
-the `fetch` tool (mcp-server-fetch) rather than on search boilerplate. That
-two-tier split is what research_eval measured gemma4-26b handling cleanly: 3/3
-facts, 0 fabrications, every deep source fetched, in 6 tool calls.
+Three tools: `search`, `news` and `read`. Search results are pure pointers --
+title and URL, no page text (see INCLUDE_SNIPPETS) -- so the model spends its
+context on pages it chose to open with `read` rather than on search boilerplate.
+That two-tier split is what research_eval measured gemma4-26b handling cleanly:
+3/3 facts, 0 fabrications, every deep source fetched, in 6 tool calls.
+
+`read` is also the only source of citation markers; see the `_SOURCE_SEQ`
+comment for why that matters, and local/README.md for the measurements behind
+every design choice here.
 
 Run: uv run --script oe_ddg_search.py   (deps resolve from the header above)
 """
@@ -126,8 +130,32 @@ _DATE_NOTE = (
 )
 
 
+# Hosts that reliably return no extractable article text, so `read` can mint no
+# marker for them and the model ends up with nothing it may cite.
+#
+# Measured on DuckDuckGo news: "Mark Carney Canada investment summit" returned
+# msn.com for 10 of 10 results, while "Canada EU associate member" returned none
+# -- so on some queries EVERY result was unreadable and the run produced an
+# uncited report despite the model dutifully calling `read`. These are wrappers
+# that render their article client-side; the underlying publisher is usually in
+# the results too, one position lower, and is readable.
+_UNREADABLE_HOSTS = ("msn.com", "news.google.com")
+
+# Over-request, then filter, so dropping wrappers does not shrink the result
+# list below what was asked for.
+_OVERFETCH = 3
+
+
 def _clamp(n: int) -> int:
     return max(1, min(int(n), MAX_RESULTS_CAP))
+
+
+def _drop_unreadable(rows: list[dict], url_key: str, want: int) -> list[dict]:
+    return [
+        r
+        for r in rows
+        if not any(h in (r.get(url_key) or "") for h in _UNREADABLE_HOSTS)
+    ][:want]
 
 
 def _snippet(text: object) -> str:
@@ -180,8 +208,9 @@ def _render(rows: list[dict], url_key: str, extra: tuple[str, ...] = ()) -> str:
     )
 )
 def search(query: str, max_results: int = 8) -> str:
-    rows = DDGS().text(query, max_results=_clamp(max_results))
-    return _render(rows, url_key="href")
+    want = _clamp(max_results)
+    rows = DDGS().text(query, max_results=want * _OVERFETCH)
+    return _render(_drop_unreadable(rows, "href", want), url_key="href")
 
 
 @mcp.tool(
@@ -196,8 +225,30 @@ def search(query: str, max_results: int = 8) -> str:
     )
 )
 def news(query: str, max_results: int = 8) -> str:
-    rows = DDGS().news(query, max_results=_clamp(max_results))
-    return _render(rows, url_key="url", extra=("source", "date"))
+    want = _clamp(max_results)
+    raw = DDGS().news(query, max_results=want * _OVERFETCH)
+    rows = _drop_unreadable(raw, "url", want)
+    if rows:
+        return _render(rows, url_key="url", extra=("source", "date"))
+
+    # Every news hit was an unreadable wrapper -- measured at 10/10 msn.com for
+    # some queries. Silently returning them would send the model off to read
+    # pages that yield no text and therefore no citation, which is exactly how
+    # an uncited report gets produced while the model does everything right.
+    # The web index carries the original publishers, so fall back to it.
+    web = _drop_unreadable(DDGS().text(query, max_results=want * _OVERFETCH),
+                           "href", want)
+    if not web:
+        return (
+            f"{_DATE_NOTE}\n\nEvery result for this query was an aggregator "
+            "wrapper (msn.com / news.google.com) with no readable article text, "
+            "in both the news and web indexes. Nothing here could be read or "
+            "cited. Try different search terms, or name the publisher you want."
+        )
+    return _render(web, url_key="href") + (
+        "\n\n(The news index returned only aggregator wrappers for this query, "
+        "so these are web results for the same terms.)"
+    )
 
 
 @mcp.tool(
