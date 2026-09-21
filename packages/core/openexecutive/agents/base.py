@@ -8,7 +8,19 @@ from openexecutive.audit.usage import log_model_usage
 from openexecutive.config import get_settings
 from openexecutive.providers import get_provider, model_supports_deep_reasoning
 
-_SPECIALIST_TIMEOUT = 180.0
+# LOCAL-ONLY FORK: was a hardcoded 180.0. Now configurable, default unchanged.
+#
+# Upstream's 180s is generous when eight consults really do run in parallel on
+# a hosted API. On one local GPU they do not: every specialist queues behind a
+# single Ollama runner at ~40s each, so the ones dispatched last wait 200-280s
+# before their generation even starts and blow the read timeout. Measured: a
+# consult-all-eight turn died with httpcore.ReadTimeout ~20s after the last
+# specialist finished.
+#
+# Set SPECIALIST_TIMEOUT_S well above (number of specialists x per-call time)
+# on a single-GPU box. 900 is comfortable for eight.
+def _specialist_timeout() -> float:
+    return get_settings().specialist_timeout_s
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +135,7 @@ class BaseAgent(ABC):
             # Per-request timeout — keeps cancellation semantics aligned with
             # the previous per-client timeout, but the provider singleton no
             # longer needs to recreate the SDK client to set it.
-            "timeout": _SPECIALIST_TIMEOUT,
+            "timeout": _specialist_timeout(),
             "system": [
                 {
                     "type": "text",
@@ -174,7 +186,7 @@ class BaseAgent(ABC):
         tools: list[dict[str, Any]],
         system_addendum: str = "",
         max_tokens: int = 4096,
-        timeout_seconds: float = _SPECIALIST_TIMEOUT,
+        timeout_seconds: float | None = None,
         model_override: str | None = None,
         deep_reasoning_override: bool | None = None,
         actor: str = "specialist_tools",
@@ -226,7 +238,7 @@ class BaseAgent(ABC):
         create_kwargs: dict[str, Any] = {
             "model": model,
             "max_tokens": max_tokens,
-            "timeout": timeout_seconds,
+            "timeout": timeout_seconds or _specialist_timeout(),
             "system": [
                 {
                     "type": "text",

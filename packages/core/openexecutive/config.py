@@ -220,6 +220,11 @@ class Settings(BaseSettings):
     # Default 10s covers the latter while still failing fast enough that a
     # stuck request doesn't pile up tasks.
     utility_fast_timeout_s: float = Field(10.0, alias="UTILITY_FAST_TIMEOUT_S")
+    # Per-specialist request timeout (agents/base.py). Upstream hardcoded 180s,
+    # which assumes parallel consults really are parallel. On a single local GPU
+    # they serialize behind one model runner, so raise this above
+    # (specialists x per-call seconds) or the last ones dispatched time out.
+    specialist_timeout_s: float = Field(180.0, alias="SPECIALIST_TIMEOUT_S")
 
     @model_validator(mode="after")
     def _validate_openrouter(self) -> "Settings":
