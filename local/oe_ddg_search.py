@@ -23,12 +23,27 @@ Run: uv run --script oe_ddg_search.py   (deps resolve from the header above)
 
 from __future__ import annotations
 
+import itertools
 from datetime import date
 
 from ddgs import DDGS
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("oe-ddg-search")
+
+# Citation markers, not raw URLs.
+#
+# Measured: this model cited 0/4 runs when citing meant writing a URL into
+# prose, having genuinely read the pages. In research_eval it scored 3/3 on
+# citations -- where a source was a short bracket marker like [D1]. So the
+# failure looks like FORMAT, not discipline: it will carry a token, it will not
+# carry a URL.
+#
+# Markers are handed out from one monotonic counter per server process rather
+# than restarting per call, because a turn usually runs several searches and
+# per-call numbering would make [1] mean a different page each time. Numbers
+# climbing across a long-lived process is harmless; collisions would not be.
+_SOURCE_SEQ = itertools.count(1)
 
 # Snippets are pointers, not content. Long snippets crowd out the pages the
 # model actually chose to read -- context is the binding constraint locally.
@@ -90,9 +105,10 @@ def _render(rows: list[dict], url_key: str, extra: tuple[str, ...] = ()) -> str:
     if not rows:
         return f"{_DATE_NOTE}\n\nNo results. Try different or broader search terms."
     out = []
-    for i, r in enumerate(rows, 1):
+    for r in rows:
         url = r.get(url_key) or ""
-        line = [f"[{i}] {r.get('title') or '(untitled)'}", f"    {url}"]
+        marker = f"S{next(_SOURCE_SEQ)}"
+        line = [f"[{marker}] {r.get('title') or '(untitled)'}", f"    {url}"]
         meta = " | ".join(str(r[k]) for k in extra if r.get(k))
         if meta:
             line.append(f"    ({meta})")
@@ -102,15 +118,23 @@ def _render(rows: list[dict], url_key: str, extra: tuple[str, ...] = ()) -> str:
                 line.append(f"    {body}")
         out.append("\n".join(line))
 
-    closing = (
+    body_note = (
         "No page contents are included above -- only titles and URLs. You cannot "
-        "answer from this list. Call `fetch` on each URL you intend to rely on, "
-        "read it, and cite the URLs you fetched."
+        "answer from this list."
         if not INCLUDE_SNIPPETS
-        else "These are snippets only. To use any of this, call `fetch` on the "
-        "URL to read the page, and cite the URLs you actually fetched."
+        else "The text above is a preview snippet, not the page."
     )
-    return f"{_DATE_NOTE}\n\n" + "\n\n".join(out) + f"\n\n{closing}"
+    return (
+        f"{_DATE_NOTE}\n\n"
+        + "\n\n".join(out)
+        + f"\n\n{body_note} Call `fetch` on each URL you intend to rely on.\n\n"
+        "CITING: each result above has a marker like [S1]. When a sentence in "
+        "your answer uses something you fetched, put that page's marker at the "
+        "end of the sentence, e.g. 'Ottawa committed $36B over five years [S4].' "
+        "Then finish your answer with a `Sources` section listing every marker "
+        "you used and its URL, one per line. Use the markers -- do not write "
+        "bare URLs in the body of the report."
+    )
 
 
 @mcp.tool(
