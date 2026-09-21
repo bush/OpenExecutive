@@ -12,11 +12,11 @@ request reaches a local model -- the local server cannot execute it. Client-side
 tools carrying an `input_schema` are NOT stripped, and MCP tools arrive in
 exactly that shape, so this restores search for the local-only setup.
 
-Deliberately thin. Results are pointers -- title, URL, short snippet -- so the
-model spends its context on pages it chose to read via the `fetch` tool
-(mcp-server-fetch) rather than on search boilerplate. That two-tier split is
-what research_eval measured gemma4-26b handling cleanly: 3/3 facts, 0
-fabrications, every deep source fetched, in 6 tool calls.
+Deliberately thin: results are pure pointers -- title and URL, no page text (see
+INCLUDE_SNIPPETS). The model spends its context on pages it chose to read via
+the `fetch` tool (mcp-server-fetch) rather than on search boilerplate. That
+two-tier split is what research_eval measured gemma4-26b handling cleanly: 3/3
+facts, 0 fabrications, every deep source fetched, in 6 tool calls.
 
 Run: uv run --script oe_ddg_search.py   (deps resolve from the header above)
 """
@@ -34,6 +34,25 @@ mcp = FastMCP("oe-ddg-search")
 # model actually chose to read -- context is the binding constraint locally.
 SNIPPET_CHARS = 300
 MAX_RESULTS_CAP = 15
+
+# Starve the snippets, so that reading a page is the only way to learn anything.
+#
+# Measured across three runs of the same broad research question, the local
+# model searched, read the snippets, and wrote a confident report WITHOUT ever
+# calling `fetch` -- so every run produced real, verifiable facts with zero
+# citations, and no way to tell a sourced claim from a recalled one. Giving it
+# more time did not change this (449s -> 177s -> 83s, still no fetch), and nor
+# did instructing it to fetch, in both the system prompt and these tool
+# descriptions. It is a follow-through failure, not a budget or wording one.
+#
+# With bodies withheld, a result is a title and a URL: enough to choose what to
+# read, not enough to answer from. The model cannot route around a fact that is
+# simply absent, which is why this is a tool-shaped fix rather than another
+# instruction. `news` still carries source + date, which are selection metadata
+# rather than content -- the model needs them to judge recency.
+#
+# Set back to True to restore snippets (and accept the uncited reports).
+INCLUDE_SNIPPETS = False
 
 # Why the date is stated everywhere below: a local model's training data ends
 # well before today, so asked about "September 2026" it concluded the date was
@@ -77,24 +96,29 @@ def _render(rows: list[dict], url_key: str, extra: tuple[str, ...] = ()) -> str:
         meta = " | ".join(str(r[k]) for k in extra if r.get(k))
         if meta:
             line.append(f"    ({meta})")
-        body = _snippet(r.get("body"))
-        if body:
-            line.append(f"    {body}")
+        if INCLUDE_SNIPPETS:
+            body = _snippet(r.get("body"))
+            if body:
+                line.append(f"    {body}")
         out.append("\n".join(line))
-    return (
-        f"{_DATE_NOTE}\n\n"
-        + "\n\n".join(out)
-        + "\n\nThese are snippets only. To use any of this, call `fetch` on the "
+
+    closing = (
+        "No page contents are included above -- only titles and URLs. You cannot "
+        "answer from this list. Call `fetch` on each URL you intend to rely on, "
+        "read it, and cite the URLs you fetched."
+        if not INCLUDE_SNIPPETS
+        else "These are snippets only. To use any of this, call `fetch` on the "
         "URL to read the page, and cite the URLs you actually fetched."
     )
+    return f"{_DATE_NOTE}\n\n" + "\n\n".join(out) + f"\n\n{closing}"
 
 
 @mcp.tool(
     description=(
         f"Search the web for pages about a topic. {_DATE_NOTE} "
-        "Returns titles, URLs and short snippets. Snippets are previews only and "
-        "are not sufficient to answer from: pick the promising URLs and read them "
-        "with the `fetch` tool before stating anything as fact. "
+        "Returns titles and URLs ONLY -- no page text. You cannot answer from these "
+        "results: they tell you what exists and where. Choose the relevant URLs and "
+        "read them with the `fetch` tool, then cite what you fetched. "
         "Args: query (plain keywords beat a full question), "
         "max_results (1-15, default 8)."
     )
@@ -109,8 +133,8 @@ def search(query: str, max_results: int = 8) -> str:
         f"Search recent news. {_DATE_NOTE} "
         "Prefer this over `search` when the question is about current or recent "
         "events, because each result carries a publication date you can check for "
-        "recency. Returns headlines, URLs, sources and dates. As with `search`, "
-        "these are snippets -- call `fetch` to read a story before relying on it. "
+        "recency. Returns headlines, URLs, sources and dates -- but NO story text. "
+        "Call `fetch` on a URL to read the story before relying on it. "
         "Args: query (terms describing the event or topic), "
         "max_results (1-15, default 8)."
     )
