@@ -56,7 +56,10 @@ from openexecutive.orchestrator.people_tools import (
 )
 from openexecutive.orchestrator.research_tools import (
     RESEARCH_TOOL_HANDLERS,
-    RESEARCH_TOOLS,
+    RESEARCH_TOOLS,  # noqa: F401  LOCAL-ONLY FORK: unused while the tool is
+    # removed from _ALL_SKILL_TOOLS below; kept imported so restoring upstream
+    # behaviour is a one-line change there. The handler stays registered too --
+    # harmless, since nothing can call a tool the model is never offered.
 )
 from openexecutive.orchestrator.router import (
     SPECIALIST_TOOLS,
@@ -315,7 +318,27 @@ _ALL_SKILL_TOOLS = [
     *DEPARTMENT_TOOLS,
     *BROADCAST_TOOLS,
     *WATCHLIST_TOOLS,
-    *RESEARCH_TOOLS,
+    # LOCAL-ONLY FORK: *RESEARCH_TOOLS removed on purpose. See local/README.md.
+    #
+    # run_executive_research cannot research on a no-API-key deployment. Its
+    # specialists are built in monitoring/research/specialist_research.py as
+    # `[EMIT_RESEARCH_FINDINGS_TOOL] + build_web_search_tool()`, and on a local
+    # model that second tool is None (ENABLE_WEB_SEARCH=false, and Anthropic's
+    # server-side web_search is stripped for local models by
+    # providers/feature_gate.py regardless). MCP tools are never added there --
+    # MCP dispatch lives only in this file. So the fan-out has nothing to search
+    # with, yet the Executive still prefers it for research-shaped questions:
+    # measured, it burned 5 minutes across 7 specialists and returned nothing.
+    #
+    # Removing the tool is structural. Forbidding it in the system prompt was
+    # tried first and did NOT hold -- it worked for "what happened at X" and
+    # failed for "research X for me", which matches our own finding that prompt
+    # wording relocates a failure rather than removing it.
+    #
+    # To restore upstream behaviour, put `*RESEARCH_TOOLS,` back here. The real
+    # fix would be threading the MCP gateway into agents/base.py's
+    # analyze_with_tools so specialists can search; until then this is dead code
+    # on this deployment.
     *WORKFLOW_AUTHORING_TOOLS,
     *WORKFLOW_RUN_TOOLS,
     *FORM_TOOLS,

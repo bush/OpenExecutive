@@ -1,0 +1,38 @@
+{
+  "_comment": "Local-only search+fetch for the no-API-key setup. Open Executive's builtin web_search is Anthropic's SERVER-side tool and is stripped by providers/feature_gate.py before reaching a local model; MCP tools arrive as client tools with input_schema and survive. search = our ~/work/oe-tools/oe_ddg_search.py (keyless ddgs); fetch = official mcp-server-fetch (readabilipy extraction). Absolute command paths on purpose: the MCP stdio client gives children only a fixed env allowlist, so ~/.local/bin is not guaranteed on PATH.",
+  "mcpServers": {
+    "search": {
+      "command": "/ABSOLUTE/PATH/TO/uv",
+      "args": [
+        "run",
+        "--script",
+        "/ABSOLUTE/PATH/TO/OpenExecutive/local/oe_ddg_search.py"
+      ]
+    },
+    "fetch": {
+      "command": "/ABSOLUTE/PATH/TO/uvx",
+      "args": [
+        "mcp-server-fetch"
+      ]
+    }
+  },
+  "filters": {
+    "access_control": {
+      "deny_patterns": [
+        "*__delete_*",
+        "*__drop_*",
+        "*__destroy_*",
+        "*__remove_*"
+      ],
+      "deny": [],
+      "allow_servers": []
+    },
+    "load_control": {
+      "deny_url_patterns": [
+        "http://*"
+      ],
+      "allow_url_patterns": []
+    },
+    "similarity_threshold": 0.3
+  }
+}
