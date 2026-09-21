@@ -30,10 +30,12 @@ shape. That is the whole basis of the workaround below.
 
 ## 1. Web search via MCP (`oe_ddg_search.py`)
 
-A keyless DuckDuckGo MCP server exposing `search` and `news`, paired with the
-official `mcp-server-fetch` for reading pages. Single file, PEP 723 header, so
-`uv run --script` resolves its own dependencies — nothing to install or
-maintain a venv for.
+A keyless MCP server exposing three tools: `search`, `news` and `read`. Single
+file, PEP 723 header, so `uv run --script` resolves its own dependencies —
+nothing to install or maintain a venv for.
+
+`read` fetches a URL, extracts the article with `readabilipy` + `markdownify`,
+and returns the text **together with a source marker** like `[S1]`.
 
 Copy `mcp_servers.json.example` to `company/mcp_servers.json`, fix the absolute
 paths, restart the API. **The presence of that file is what enables MCP**
@@ -42,13 +44,18 @@ paths, restart the API. **The presence of that file is what enables MCP**
 Use absolute command paths. The MCP stdio client gives child processes only a
 fixed env allowlist, so `~/.local/bin` is not reliably on their `PATH`.
 
-**Why our own server for search but the official package for fetch:** fetching
-is the hard half — `mcp-server-fetch` brings `readabilipy` + `markdownify` +
-`protego`, and without real article extraction the model receives raw HTML that
-destroys a local context window. Search is the easy half, and the popular
-third-party DuckDuckGo MCP server hand-scrapes DDG with BeautifulSoup rather
-than using `ddgs`, the maintained library that exists to absorb exactly that
-breakage. So: buy the hard half, own the easy half.
+**Why not the official `mcp-server-fetch`:** it was used at first, and it works
+well. It had to go because it hands back page content with no source marker,
+which reopens the hole described under "citations" below — the model could read
+via `fetch`, cite via a search-listing marker, and the two need not be the same
+page. `read` reimplements the part that matters (`readabilipy` + `markdownify`,
+the same libraries it uses) so that content and citation are minted together.
+What is given up: `protego` robots handling. These are user-initiated reads of
+specific URLs the person asked about, not crawling.
+
+The search half is ours because the popular third-party DuckDuckGo MCP server
+hand-scrapes DDG with BeautifulSoup rather than using `ddgs`, the maintained
+library that exists to absorb exactly that breakage.
 
 **The date problem.** Open Executive never puts today's date in the system
 prompt. A local model's training data ends well before now, so asked about
@@ -84,10 +91,30 @@ fan-out would be minutes per turn.
 - **No parallel research fan-out.** Ask the angles as separate questions
   instead; each returns in ~90s rather than one 10-minute turn.
 - **No prompt caching, no extended thinking.** Inherent to the local path.
-- **The model does not always `fetch`.** It sometimes answers from search
-  snippets alone, which produces a well-grounded report with no citations. The
-  prompt asks it to fetch before asserting; it complies for narrow questions
-  more reliably than for broad ones.
+- **Citation depends on the model choosing to `read`.** It cannot cite what it
+  has not read, but it can still write an uncited report — see below.
+
+## Citations, and two failures worth not repeating
+
+Measured on the same broad research question each time:
+
+| search returns | pages read | citations |
+|---|---|---|
+| title + URL + snippet | 0 | 0 |
+| title + URL only | 2 | 0 |
+| title + URL + `[S]` marker | **0** | **9, all false** |
+| title + URL only, marker minted by `read` | see below | |
+
+Withholding snippets made it read pages — it could no longer answer from the
+listing. Putting citation markers in that listing made it cite nine pages it had
+never opened, because a marker was obtainable without reading. A report that
+looks sourced and is not is worse than one that is visibly unsourced.
+
+Hence the current design: **the marker is minted by `read`, on a successful
+fetch, and nowhere else.** A citation is therefore evidence the page was read.
+The bracket format matters too — this model carries `[S1]` through synthesis
+reliably and will not carry a bare URL, which matches `research_eval`, where it
+scored 3/3 on citations written as `[D1]`.
 
 ## Restoring upstream behaviour
 

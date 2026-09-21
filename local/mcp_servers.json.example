@@ -1,5 +1,4 @@
 {
-  "_comment": "Local-only search+fetch for the no-API-key setup. Open Executive's builtin web_search is Anthropic's SERVER-side tool and is stripped by providers/feature_gate.py before reaching a local model; MCP tools arrive as client tools with input_schema and survive. search = our ~/work/oe-tools/oe_ddg_search.py (keyless ddgs); fetch = official mcp-server-fetch (readabilipy extraction). Absolute command paths on purpose: the MCP stdio client gives children only a fixed env allowlist, so ~/.local/bin is not guaranteed on PATH.",
   "mcpServers": {
     "search": {
       "command": "/ABSOLUTE/PATH/TO/uv",
@@ -7,12 +6,6 @@
         "run",
         "--script",
         "/ABSOLUTE/PATH/TO/OpenExecutive/local/oe_ddg_search.py"
-      ]
-    },
-    "fetch": {
-      "command": "/ABSOLUTE/PATH/TO/uvx",
-      "args": [
-        "mcp-server-fetch"
       ]
     }
   },
@@ -34,5 +27,6 @@
       "allow_url_patterns": []
     },
     "similarity_threshold": 0.3
-  }
+  },
+  "_comment": "Local-only search+read for a no-API-key deployment. Open Executive's builtin web_search is Anthropic's SERVER-side tool and is stripped by providers/feature_gate.py before reaching a local model; MCP tools arrive as client tools with input_schema and survive. One server only: oe_ddg_search.py provides search, news AND read. The official mcp-server-fetch is deliberately NOT configured -- it would hand the model page content without a source marker, which is exactly the hole that let it cite nine pages it never opened. Absolute command paths on purpose: the MCP stdio client gives children only a fixed env allowlist, so ~/.local/bin is not guaranteed on PATH."
 }

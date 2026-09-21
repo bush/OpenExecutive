@@ -1,7 +1,13 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["mcp>=1.29,<2", "ddgs>=9.14"]
+# dependencies = [
+#   "mcp>=1.29,<2",
+#   "ddgs>=9.14",
+#   "httpx>=0.27",
+#   "readabilipy>=0.2",
+#   "markdownify>=0.13",
+# ]
 # ///
 """Keyless DuckDuckGo search as an MCP stdio server, for Open Executive.
 
@@ -24,26 +30,56 @@ Run: uv run --script oe_ddg_search.py   (deps resolve from the header above)
 from __future__ import annotations
 
 import itertools
+import warnings
 from datetime import date
 
+import httpx
 from ddgs import DDGS
+from markdownify import markdownify
 from mcp.server.fastmcp import FastMCP
+from readabilipy import simple_json_from_html_string
+
+warnings.filterwarnings("ignore")
 
 mcp = FastMCP("oe-ddg-search")
 
-# Citation markers, not raw URLs.
+# Citation markers, minted ONLY by `read`.
 #
-# Measured: this model cited 0/4 runs when citing meant writing a URL into
-# prose, having genuinely read the pages. In research_eval it scored 3/3 on
-# citations -- where a source was a short bracket marker like [D1]. So the
-# failure looks like FORMAT, not discipline: it will carry a token, it will not
-# carry a URL.
+# Two measured failures produced this design, and they pull in opposite
+# directions:
 #
-# Markers are handed out from one monotonic counter per server process rather
-# than restarting per call, because a turn usually runs several searches and
-# per-call numbering would make [1] mean a different page each time. Numbers
-# climbing across a long-lived process is harmless; collisions would not be.
+#   snippets withheld, cite URLs      -> 2 pages read, 0 citations
+#   snippets withheld, cite [S] marks -> 0 pages read, 9 citations, ALL FALSE
+#
+# The first: the model reads pages but will not carry a URL into prose. In
+# research_eval it scored 3/3 on citations where a source was a short bracket
+# marker like [D1], so this is a FORMAT limit, not a discipline one.
+#
+# The second is the trap. Markers were handed out in the SEARCH listing, so the
+# model could emit a citation for a page it had never opened -- and it did,
+# citing nine sources it never read. A report that looks sourced and is not is
+# worse than one that is visibly unsourced.
+#
+# So the marker is now minted by `read`, on a successful fetch, and nowhere
+# else. There is no way to obtain a citation without having read the page. The
+# format the model is good at, gated behind the work it was skipping.
+#
+# Markers are stable per URL (re-reading a page returns its existing marker) and
+# monotonic per server process, so several searches in one turn cannot collide.
 _SOURCE_SEQ = itertools.count(1)
+_MARKERS: dict[str, str] = {}
+
+# Page text is capped per call; local context is the binding constraint. A
+# truncated read reports how to continue rather than silently losing the tail.
+READ_CHARS = 8000
+
+# A browser UA. Measured: CBC times out on the MCP default UA and serves fine
+# on this one. These are user-initiated reads of specific URLs the person asked
+# about -- the same pages they would open themselves -- not crawling.
+_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"
+)
 
 # Snippets are pointers, not content. Long snippets crowd out the pages the
 # model actually chose to read -- context is the binding constraint locally.
@@ -105,10 +141,9 @@ def _render(rows: list[dict], url_key: str, extra: tuple[str, ...] = ()) -> str:
     if not rows:
         return f"{_DATE_NOTE}\n\nNo results. Try different or broader search terms."
     out = []
-    for r in rows:
+    for i, r in enumerate(rows, 1):
         url = r.get(url_key) or ""
-        marker = f"S{next(_SOURCE_SEQ)}"
-        line = [f"[{marker}] {r.get('title') or '(untitled)'}", f"    {url}"]
+        line = [f"{i}. {r.get('title') or '(untitled)'}", f"    {url}"]
         meta = " | ".join(str(r[k]) for k in extra if r.get(k))
         if meta:
             line.append(f"    ({meta})")
@@ -120,20 +155,17 @@ def _render(rows: list[dict], url_key: str, extra: tuple[str, ...] = ()) -> str:
 
     body_note = (
         "No page contents are included above -- only titles and URLs. You cannot "
-        "answer from this list."
+        "answer from this list, and it gives you nothing you may cite."
         if not INCLUDE_SNIPPETS
         else "The text above is a preview snippet, not the page."
     )
     return (
         f"{_DATE_NOTE}\n\n"
         + "\n\n".join(out)
-        + f"\n\n{body_note} Call `fetch` on each URL you intend to rely on.\n\n"
-        "CITING: each result above has a marker like [S1]. When a sentence in "
-        "your answer uses something you fetched, put that page's marker at the "
-        "end of the sentence, e.g. 'Ottawa committed $36B over five years [S4].' "
-        "Then finish your answer with a `Sources` section listing every marker "
-        "you used and its URL, one per line. Use the markers -- do not write "
-        "bare URLs in the body of the report."
+        + f"\n\n{body_note} Call `read` on each URL you intend to rely on. "
+        "`read` returns the page text together with a source marker like [S1], "
+        "and that marker is the only citation you can use -- there is no way to "
+        "cite a page you have not read."
     )
 
 
@@ -166,6 +198,70 @@ def search(query: str, max_results: int = 8) -> str:
 def news(query: str, max_results: int = 8) -> str:
     rows = DDGS().news(query, max_results=_clamp(max_results))
     return _render(rows, url_key="url", extra=("source", "date"))
+
+
+@mcp.tool(
+    description=(
+        "Read a web page and get its text, plus the source marker you must cite "
+        "it by. This is the ONLY way to obtain page content, and the ONLY way to "
+        "obtain a citation: search gives you URLs, `read` gives you what the page "
+        "actually says. Returns a marker like [S1] -- put that at the end of any "
+        "sentence built on this page, and list the markers you used with their "
+        "URLs in a `Sources` section at the end of your answer. Long pages are "
+        "truncated and tell you how to continue. "
+        "Args: url (from a search result), start_index (default 0; pass the "
+        "offset the previous call reported to read further)."
+    )
+)
+def read(url: str, start_index: int = 0) -> str:
+    try:
+        resp = httpx.get(
+            url, follow_redirects=True, timeout=30.0, headers={"User-Agent": _UA}
+        )
+    except Exception as exc:  # network, DNS, TLS, redirect loops
+        return (
+            f"Could not reach {url} ({type(exc).__name__}). Nothing was read, so "
+            "there is no marker and nothing here may be cited. Try another source."
+        )
+    if resp.status_code != 200:
+        return (
+            f"{url} returned HTTP {resp.status_code}. Nothing was read, so there "
+            "is no marker and nothing here may be cited. Try another source."
+        )
+
+    try:
+        parsed = simple_json_from_html_string(resp.text, use_readability=True)
+        title = parsed.get("title") or url
+        text = markdownify(parsed.get("content") or "").strip()
+    except Exception:
+        title, text = url, ""
+
+    if not text:
+        return (
+            f"{url} was reached but no article text could be extracted (it may be "
+            "a video, a paywall, or a listing page). Nothing may be cited from "
+            "it. Try another source."
+        )
+
+    # Mint the marker only now -- the page was genuinely fetched and parsed.
+    marker = _MARKERS.get(url)
+    if marker is None:
+        marker = f"S{next(_SOURCE_SEQ)}"
+        _MARKERS[url] = marker
+
+    start = max(0, int(start_index))
+    chunk = text[start : start + READ_CHARS]
+    remaining = len(text) - (start + len(chunk))
+    more = (
+        f"\n\n[{remaining} characters not shown. To continue this page, call "
+        f"read(url, start_index={start + len(chunk)}).]"
+        if remaining > 0
+        else ""
+    )
+    return (
+        f"SOURCE MARKER: [{marker}]  -- cite anything you take from this page as "
+        f"[{marker}]\nTITLE: {title}\nURL: {url}\n\n{chunk}{more}"
+    )
 
 
 if __name__ == "__main__":
